@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Patients - FHIR Report System</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f5f5f5; }
+        .navbar {
+            background: #B1005D;
+            padding: 15px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .nav-brand { font-size: 24px; font-weight: bold; color: white; }
+        .user-profile {
+            background: rgba(255,255,255,0.2);
+            padding: 8px 15px;
+            border-radius: 20px;
+            color: white;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .logout-btn {
+            background: #333;
+            color: white;
+            border: none;
+            padding: 6px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .container { max-width: 1400px; margin: 20px auto; padding: 0 20px; }
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+        .card h3 {
+            margin-bottom: 15px;
+            color: #B1005D;
+            border-left: 4px solid #B1005D;
+            padding-left: 15px;
+        }
+        .filters {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+        }
+        .filter-group { display: flex; flex-direction: column; gap: 5px; }
+        .filter-group label { font-size: 12px; color: #666; font-weight: 500; }
+        select, input { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; }
+        button {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .btn-primary { background: #B1005D; color: white; }
+        .btn-secondary { background: #95a5a6; color: white; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-info { background: #3498db; color: white; }
+        .export-bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+        .patient-stats {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .table-wrapper { overflow-x: auto; max-height: none; overflow-y: visible; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #B1005D; color: white; position: sticky; top: 0; }
+        tr:hover { background: #f8f9fa; }
+        .checkbox-col { width: 40px; }
+        .select-all { margin-bottom: 10px; }
+        .loading { text-align: center; padding: 40px; color: #999; }
+        .loading-indicator { text-align: center; padding: 20px; color: #B1005D; display: none; }
+    </style>
+</head>
+<body>
+    <div class="navbar">
+        <div class="nav-brand">🏥 FHIR Report System</div>
+        <div class="user-profile">
+            <span>👤 <span id="userFullname">User</span></span>
+            <button class="logout-btn" onclick="logout()">Logout</button>
+        </div>
+    </div>
+    <div class="container">
+        <div class="card">
+            <h3>🔍 Filters</h3>
+            <div class="filters">
+                <div class="filter-group"><label>Gender</label><select id="genderFilter"><option value="all">All</option><option value="male">Male</option><option value="female">Female</option><option value="other">Other</option></select></div>
+                <div class="filter-group"><label>Age Range</label><div style="display:flex;gap:5px"><input type="number" id="ageMin" placeholder="Min" value="0" style="width:70px"><span>-</span><input type="number" id="ageMax" placeholder="Max" value="120" style="width:70px"></div></div>
+                <div class="filter-group"><label>Search Name</label><input type="text" id="searchInput" placeholder="Name..."></div>
+                <div class="filter-group"><label>Admission Date</label><input type="date" id="admitStart"> to <input type="date" id="admitEnd"></div>
+                <div class="filter-group"><label>Consult Date</label><input type="date" id="consultStart"> to <input type="date" id="consultEnd"></div>
+                <div class="filter-group"><label>Treatment Date</label><input type="date" id="treatStart"> to <input type="date" id="treatEnd"></div>
+                <div class="filter-group"><label>Discharge Date</label><input type="date" id="dischargeStart"> to <input type="date" id="dischargeEnd"></div>
+            </div>
+            <div style="margin-top:15px;display:flex;gap:10px">
+                <button class="btn-primary" onclick="applyFilters()">Apply Filters</button>
+                <button class="btn-secondary" onclick="resetFilters()">Reset</button>
+            </div>
+        </div>
+        <div class="card">
+            <h3>📤 Export Options</h3>
+            <div class="export-bar">
+                <button class="btn-success" onclick="exportSelected('excel')">📊 Export Selected to Excel</button>
+                <button class="btn-info" onclick="exportSelected('csv')">📜 Export Selected to CSV</button>
+                <button class="btn-primary" onclick="exportSelected('html')">📄 Export Selected to HTML</button>
+                <span style="margin-left:auto;">Patients per page: 
+                    <select id="perPageSelect" onchange="changePerPage()">
+                        <option value="25" selected>25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                </span>
+            </div>
+        </div>
+        <div class="card">
+            <div class="patient-stats">
+                <h3>📋 Patient List</h3>
+                <div><span id="patientCount">0</span> patients loaded | <span id="loadedPages">Page 1</span></div>
+            </div>
+            <div class="select-all"><label><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll()"> Select All on current page</label></div>
+            <div class="table-wrapper"><table id="patientTable"><thead><tr><th class="checkbox-col">Select</th><th>ID</th><th>Name</th><th>Gender</th><th>Age</th><th>Admission</th><th>Consult</th><th>Treatment</th><th>Discharge</th><th>MRN</th></tr></thead><tbody id="patientTableBody"><tr><td colspan="10" class="loading">Loading......</td></tr></tbody></table></div>
+            <div id="loadingMore" class="loading-indicator">Loading more patients...</div>
+        </div>
+    </div>
+    <script>
+        let currentPatients = [];
+        let currentPage = 1;
+        let perPage = 25;  // default 25 for speed
+        let totalPages = 1;
+        let selectedPatientIds = new Set();
+        let isLoading = false;
+        let hasMore = true;
+        let totalPatientCount = 0;
+        let scrollTimeout;
+
+        async function loadUserProfile() {
+            const res = await fetch('/api/user');
+            if (res.ok) {
+                const user = await res.json();
+                document.getElementById('userFullname').innerText = user.fullname || user.username;
+            } else { window.location.href = '/login'; }
+        }
+
+        function getFilters() {
+            return {
+                gender: document.getElementById('genderFilter').value,
+                age_min: document.getElementById('ageMin').value,
+                age_max: document.getElementById('ageMax').value,
+                search: document.getElementById('searchInput').value,
+                admit_start: document.getElementById('admitStart').value,
+                admit_end: document.getElementById('admitEnd').value,
+                consult_start: document.getElementById('consultStart').value,
+                consult_end: document.getElementById('consultEnd').value,
+                treat_start: document.getElementById('treatStart').value,
+                treat_end: document.getElementById('treatEnd').value,
+                discharge_start: document.getElementById('dischargeStart').value,
+                discharge_end: document.getElementById('dischargeEnd').value,
+                page: currentPage,
+                per_page: perPage
+            };
+        }
+
+        async function loadPatients(reset = true) {
+            if (reset) {
+                currentPage = 1;
+                hasMore = true;
+                selectedPatientIds.clear();
+                document.getElementById('patientTableBody').innerHTML = '<tr><td colspan="10" class="loading">Loading...</td></tr>';
+                document.getElementById('selectAllCheckbox').checked = false;
+            }
+            if (isLoading) return;
+            isLoading = true;
+            document.getElementById('loadingMore').style.display = 'block';
+            const params = new URLSearchParams(getFilters());
+            const res = await fetch(`/api/patients?${params}`);
+            const data = await res.json();
+            isLoading = false;
+            document.getElementById('loadingMore').style.display = 'none';
+            if (res.ok) {
+                if (reset) {
+                    currentPatients = data.patients;
+                    renderTable(currentPatients);
+                    totalPatientCount = data.total;
+                    document.getElementById('patientCount').innerText = totalPatientCount;
+                    document.getElementById('loadedPages').innerText = `Page ${currentPage} of ${data.total_pages}`;
+                    totalPages = data.total_pages;
+                    hasMore = currentPage < totalPages;
+                } else {
+                    currentPatients = [...currentPatients, ...data.patients];
+                    appendTableRows(data.patients);
+                    document.getElementById('loadedPages').innerText = `Page ${currentPage} of ${data.total_pages}`;
+                    hasMore = currentPage < data.total_pages;
+                }
+            } else { alert('Failed to load patients'); }
+        }
+
+        function renderTable(patients) {
+            const tbody = document.getElementById('patientTableBody');
+            if (patients.length === 0) { tbody.innerHTML = '<tr><td colspan="10" class="loading">No patients found</td></tr>'; return; }
+            tbody.innerHTML = patients.map(p => `
+                <tr><td class="checkbox-col"><input type="checkbox" class="patient-checkbox" data-id="${p.id}" ${selectedPatientIds.has(p.id) ? 'checked' : ''} onchange="togglePatient('${p.id}')"></td>
+                <td>${p.id}</td><td>${p.name}</td><td>${p.gender === 'male' ? 'Male' : p.gender === 'female' ? 'Female' : 'Other'}</td>
+                <td>${p.age}</td><td>${p.admission_time || 'N/A'}</td><td>${p.consult_time || 'N/A'}</td>
+                <td>${p.treatment_time || 'N/A'}</td><td>${p.discharge_time || 'N/A'}</td><td>${p.mrn}</td></tr>
+            `).join('');
+            attachCheckboxEvents();
+        }
+
+        function appendTableRows(patients) {
+            const tbody = document.getElementById('patientTableBody');
+            patients.forEach(p => {
+                const row = tbody.insertRow();
+                row.innerHTML = `
+                    <td class="checkbox-col"><input type="checkbox" class="patient-checkbox" data-id="${p.id}" onchange="togglePatient('${p.id}')"></td>
+                    <td>${p.id}</td><td>${p.name}</td><td>${p.gender === 'male' ? 'Male' : p.gender === 'female' ? 'Female' : 'Other'}</td>
+                    <td>${p.age}</td><td>${p.admission_time || 'N/A'}</td><td>${p.consult_time || 'N/A'}</td>
+                    <td>${p.treatment_time || 'N/A'}</td><td>${p.discharge_time || 'N/A'}</td><td>${p.mrn}</td>
+                `;
+            });
+            attachCheckboxEvents();
+        }
+
+        function attachCheckboxEvents() {
+            document.querySelectorAll('.patient-checkbox').forEach(cb => {
+                cb.onchange = () => togglePatient(cb.dataset.id);
+                if (selectedPatientIds.has(cb.dataset.id)) cb.checked = true;
+            });
+        }
+
+        function togglePatient(id) {
+            if (selectedPatientIds.has(id)) selectedPatientIds.delete(id);
+            else selectedPatientIds.add(id);
+            document.getElementById('selectAllCheckbox').checked = (selectedPatientIds.size === currentPatients.length);
+        }
+
+        function toggleSelectAll() {
+            const isChecked = document.getElementById('selectAllCheckbox').checked;
+            if (isChecked) currentPatients.forEach(p => selectedPatientIds.add(p.id));
+            else selectedPatientIds.clear();
+            renderTable(currentPatients);
+        }
+
+        function applyFilters() { currentPage = 1; loadPatients(true); }
+        function resetFilters() {
+            document.getElementById('genderFilter').value = 'all';
+            document.getElementById('ageMin').value = '0';
+            document.getElementById('ageMax').value = '120';
+            document.getElementById('searchInput').value = '';
+            document.getElementById('admitStart').value = '';
+            document.getElementById('admitEnd').value = '';
+            document.getElementById('consultStart').value = '';
+            document.getElementById('consultEnd').value = '';
+            document.getElementById('treatStart').value = '';
+            document.getElementById('treatEnd').value = '';
+            document.getElementById('dischargeStart').value = '';
+            document.getElementById('dischargeEnd').value = '';
+            applyFilters();
+        }
+        function changePerPage() { perPage = parseInt(document.getElementById('perPageSelect').value); currentPage = 1; loadPatients(true); }
+
+        async function exportSelected(type) {
+            if (selectedPatientIds.size === 0) { alert('Select at least one patient'); return; }
+            const selected = currentPatients.filter(p => selectedPatientIds.has(p.id));
+            const endpoint = `/api/export_${type}`;
+            const res = await fetch(endpoint, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({patients: selected}) });
+            if (type === 'html') {
+                const data = await res.json();
+                if (data.report_html) {
+                    const blob = new Blob([data.report_html], {type:'text/html'});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = `report_${new Date().toISOString().slice(0,19)}.html`;
+                    a.click(); URL.revokeObjectURL(url);
+                }
+            } else {
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `report_${new Date().toISOString().slice(0,19)}.${type === 'excel' ? 'xlsx' : 'csv'}`;
+                a.click(); URL.revokeObjectURL(url);
+            }
+        }
+
+        async function logout() { await fetch('/api/logout', {method:'POST'}); window.location.href='/login'; }
+
+        // Infinite scroll with debounce
+        window.addEventListener('scroll', () => {
+            if (scrollTimeout) clearTimeout(scrollTimeout);
+            scrollTimeout = setTimeout(() => {
+                if (isLoading || !hasMore) return;
+                const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+                const windowHeight = window.innerHeight;
+                const docHeight = document.documentElement.scrollHeight;
+                if (scrollTop + windowHeight >= docHeight - 300) {
+                    currentPage++;
+                    loadPatients(false);
+                }
+            }, 100);
+        });
+
+        loadUserProfile();
+        loadPatients(true);
+    </script>
+</body>
+</html>
