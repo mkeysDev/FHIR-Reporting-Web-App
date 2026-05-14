@@ -1,47 +1,73 @@
-from flask import Flask, render_template, request, jsonify, session, send_file, Response, redirect, url_for
-from flask_cors import CORS # allows API endpoints to be accessed
-import pandas as pd
-import requests #helps with APIs by sending http requests
-from datetime import datetime
-import os #interacts with operating system
+import os
 import random
-import secrets #generates cryptographically strong random numbers
-import numpy as np
-from pathlib import Path #object oriented file system path manipulation
-import io #for web scraping and data manipulation
-import hashlib
 import json
+import io
+import time
+from datetime import datetime, timedelta
 from functools import wraps
 
-app = Flask(__name__, 
+import pandas as pd
+import requests
+from flask import (
+    Flask, render_template, request, jsonify, session,
+    send_file, Response, redirect
+)
+from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
+from markupsafe import escape
+
+# ---------- Persistent Secret Key ----------
+SECRET_KEY_FILE = '.secret_key'
+if os.path.exists(SECRET_KEY_FILE):
+    with open(SECRET_KEY_FILE, 'r') as f:
+        secret_key = f.read().strip()
+else:
+    secret_key = os.urandom(32).hex()
+    with open(SECRET_KEY_FILE, 'w') as f:
+        f.write(secret_key)
+    print(f"🔑 Generated new secret key (saved to {SECRET_KEY_FILE})")
+
+# ---------- App Initialization ----------
+app = Flask(__name__,
             static_folder='../static',
             static_url_path='/static',
             template_folder='../templates')
 
-app.secret_key = secrets.token_urlsafe(32)
+app.secret_key = os.environ.get('SECRET_KEY', secret_key)
+
+# Session security settings
+app.config.update(
+    SESSION_COOKIE_SECURE = False,          # Set to True when using HTTPS
+    SESSION_COOKIE_HTTPONLY = True,
+    SESSION_COOKIE_SAMESITE = 'Lax',
+    PERMANENT_SESSION_LIFETIME = timedelta(hours=2),
+    SESSION_REFRESH_EACH_REQUEST = True
+)
+
 CORS(app)
 
-# ========================================
-# CONFIGURATION
-# ========================================
-USE_SYNTHETIC_ONLY = True  # When True: uses 200 generated patients.
-                            # When False: tries real FHIR servers in order.
-                            # If all FHIR servers fail, falls back to synthetic.
+# ---------- In‑Memory Rate Limiting ----------
+rate_limit_storage = {}
 
-# For production, set these via environment variables instead of hardcoding:
-# - SECRET_KEY
-# - FHIR_SERVER_URLS (comma‑separated)
-# - USE_SYNTHETIC_ONLY (true/false)
+def rate_limit(limit=5, window=60):
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            key = f"{request.remote_addr}:{f.__name__}"
+            now = time.time()
+            window_start = now - window
+            if key in rate_limit_storage:
+                rate_limit_storage[key] = [ts for ts in rate_limit_storage[key] if ts > window_start]
+                if len(rate_limit_storage[key]) >= limit:
+                    return jsonify({'error': 'Too many requests. Please try again later.'}), 429
+            else:
+                rate_limit_storage[key] = []
+            rate_limit_storage[key].append(now)
+            return f(*args, **kwargs)
+        return wrapped
+    return decorator
 
-# FHIR Servers
-HAPI_FHIR = "https://hapi.fhir.org/baseR4"
-CMS_FHIR = "https://sandbox.cms.gov/fhir"
-OPENMRS = "https://openmrs.org/fhir"
-SMART_FHIR = "https://r4.smarthealthit.org"
-
-# ========================================
-# USER DATABASE
-# ========================================
+# ---------- User Database (JSON) ----------
 USERS_FILE = 'users.json'
 
 def load_users():
@@ -56,9 +82,6 @@ def save_users(users):
 
 users_db = load_users()
 
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
-
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -67,9 +90,14 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ========================================
-# DATA GENERATION / FHIR FETCHING
-# ========================================
+# ---------- FHIR & Data Generation (unchanged) ----------
+USE_SYNTHETIC_ONLY = True
+
+HAPI_FHIR = "https://hapi.fhir.org/baseR4"
+CMS_FHIR = "https://sandbox.cms.gov/fhir"
+OPENMRS = "https://openmrs.org/fhir"
+SMART_FHIR = "https://r4.smarthealthit.org"
+
 def generate_random_age():
     r = random.random()
     if r < 0.20:
@@ -108,24 +136,24 @@ def generate_timeline_data():
     admission_hour = random.randint(0, 23)
     admission_minute = random.randint(0, 59)
     admission_time = f"{year}-{admission_month:02d}-{admission_day:02d} {admission_hour:02d}:{admission_minute:02d}"
-    
+
     consult_offset = random.randint(1,4)
-    consult_dt = datetime(year, admission_month, admission_day, admission_hour, admission_minute) + pd.Timedelta(hours=consult_offset)
+    consult_dt = datetime(year, admission_month, admission_day, admission_hour, admission_minute) + timedelta(hours=consult_offset)
     consult_time = consult_dt.strftime("%Y-%m-%d %H:%M")
-    
+
     treat_offset = random.randint(2,8)
-    treat_dt = datetime(year, admission_month, admission_day, admission_hour, admission_minute) + pd.Timedelta(hours=treat_offset)
+    treat_dt = datetime(year, admission_month, admission_day, admission_hour, admission_minute) + timedelta(hours=treat_offset)
     treatment_time = treat_dt.strftime("%Y-%m-%d %H:%M")
-    
+
     los_days = random.randint(1,14)
-    discharge_dt = datetime(year, admission_month, admission_day, admission_hour, admission_minute) + pd.Timedelta(days=los_days, hours=random.randint(0,23))
+    discharge_dt = datetime(year, admission_month, admission_day, admission_hour, admission_minute) + timedelta(days=los_days, hours=random.randint(0,23))
     discharge_time = discharge_dt.strftime("%Y-%m-%d %H:%M")
-    
+
     consult_hours = consult_offset
     treatment_hours = treat_offset
     discharge_hours = los_days*24 + (discharge_dt.hour - admission_hour) + (discharge_dt.minute - admission_minute)/60
     treatment_to_discharge = discharge_hours - treatment_hours
-    
+
     return {
         'admission_time': admission_time,
         'consult_time': consult_time,
@@ -189,7 +217,7 @@ def fetch_fhir_patients(fhir_server, limit=100):
         print(f"❌ FHIR error: {e}")
     return None
 
-def generate_synthetic_patients(num_patients=200): 
+def generate_synthetic_patients(num_patients=200):
     print(f"🏥 Generating {num_patients} synthetic patients...")
     first_names = ["Franklin","Mary","Peter","Patricia","Robert","Jennifer","Michael","Linda",
                    "William","Lara","David","Barbara","Judge","Susan","Joseph","Jessica","Keanu",
@@ -225,7 +253,7 @@ def generate_synthetic_patients(num_patients=200):
     print(f"✅ Generated {len(patients)} synthetic patients")
     return patients
 
-# Load data source (once at startup)
+# Load data once
 ALL_PATIENTS = None
 DATA_SOURCE = "Synthetic"
 
@@ -243,9 +271,7 @@ if ALL_PATIENTS is None:
 
 print(f"📊 Data source: {DATA_SOURCE} | Total patients: {len(ALL_PATIENTS)}")
 
-# ========================================
-# FLASK ROUTES
-# ========================================
+# ---------- Flask Routes ----------
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -259,18 +285,23 @@ def signup_page():
     return render_template('signup.html')
 
 @app.route('/api/register', methods=['POST'])
+@rate_limit(limit=10, window=60)
 def register():
     data = request.json
     username = data.get('username', '').strip()
     password = data.get('password', '')
     fullname = data.get('fullname', '')
     email = data.get('email', '')
+
     if not username or not password:
         return jsonify({'error': 'Username and password required'}), 400
+    if len(password) < 4:
+        return jsonify({'error': 'Password must be at least 4 characters'}), 400
     if username in users_db:
         return jsonify({'error': 'Username already exists'}), 400
+
     users_db[username] = {
-        'password': hash_password(password),
+        'password': generate_password_hash(password),
         'fullname': fullname,
         'email': email,
         'created_at': datetime.now().isoformat()
@@ -279,22 +310,25 @@ def register():
     return jsonify({'success': True})
 
 @app.route('/api/login', methods=['POST'])
+@rate_limit(limit=5, window=60)
 def login():
     data = request.json
     username = data.get('username', '').strip()
     password = data.get('password', '')
-    if username and password:
-        user = users_db.get(username)
-        if user and user['password'] == hash_password(password):
-            session['user_id'] = username
-            session['user_name'] = user.get('fullname', username)
-            session['user_email'] = user.get('email', '')
-        else:
-            session['user_id'] = username
-            session['user_name'] = username
-            session['user_email'] = 'demo@example.com'
+
+    if not username or not password:
+        return jsonify({'error': 'Username and password required'}), 400
+
+    user = users_db.get(username)
+    if user and check_password_hash(user['password'], password):
+        session.permanent = True
+        session['user_id'] = username
+        session['user_name'] = user.get('fullname', username)
+        session['user_email'] = user.get('email', '')
+        print(f"✅ Login successful: {username}, session ID: {session.get('user_id')}")  # debug
         return jsonify({'success': True, 'redirect': '/patients'})
-    return jsonify({'error': 'Please enter username and password'}), 401
+
+    return jsonify({'error': 'Invalid username or password'}), 401
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
@@ -313,6 +347,7 @@ def get_user():
 @app.route('/patients')
 def patients():
     if 'user_id' not in session:
+        print("⚠️ No user_id in session, redirecting to login")  # debug
         return redirect('/login')
     return render_template('patients.html')
 
@@ -320,9 +355,8 @@ def patients():
 @login_required
 def get_patients():
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 25, type=int)  # Reduced default
-    
-    # Filters
+    per_page = request.args.get('per_page', 25, type=int)
+
     gender_filter = request.args.get('gender', 'all')
     age_min = request.args.get('age_min', 0, type=int)
     age_max = request.args.get('age_max', 120, type=int)
@@ -335,23 +369,25 @@ def get_patients():
     treat_end = request.args.get('treat_end', '')
     discharge_start = request.args.get('discharge_start', '')
     discharge_end = request.args.get('discharge_end', '')
-    
+
     filtered = ALL_PATIENTS[:]
-    
+
     if gender_filter != 'all':
         filtered = [p for p in filtered if p['gender'] == gender_filter]
     filtered = [p for p in filtered if age_min <= p['age'] <= age_max]
     if search_term:
         filtered = [p for p in filtered if search_term in p['name'].lower()]
-    
+
     def date_in_range(date_str, start, end):
         if not date_str:
             return True
         date_only = date_str.split()[0]
-        if start and date_only < start: return False
-        if end and date_only > end: return False
+        if start and date_only < start:
+            return False
+        if end and date_only > end:
+            return False
         return True
-    
+
     if admit_start or admit_end:
         filtered = [p for p in filtered if date_in_range(p['admission_time'], admit_start, admit_end)]
     if consult_start or consult_end:
@@ -360,12 +396,12 @@ def get_patients():
         filtered = [p for p in filtered if date_in_range(p['treatment_time'], treat_start, treat_end)]
     if discharge_start or discharge_end:
         filtered = [p for p in filtered if date_in_range(p['discharge_time'], discharge_start, discharge_end)]
-    
+
     total = len(filtered)
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
     paginated = filtered[start_idx:end_idx]
-    
+
     return jsonify({
         'patients': paginated,
         'total': total,
@@ -374,7 +410,6 @@ def get_patients():
         'total_pages': (total + per_page - 1) // per_page
     })
 
-# Export endpoints (excel, html, csv)
 @app.route('/api/export_excel', methods=['POST'])
 @login_required
 def export_excel():
@@ -385,16 +420,24 @@ def export_excel():
             return jsonify({'error': 'No patients'}), 400
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            sheet1 = [{'Patient Name':p['name'],'Admission':p['admission_time'],'Consult':p['consult_time'],
-                       'Treatment':p['treatment_time'],'Discharge':p['discharge_time']} for p in patients]
+            sheet1 = [{'Patient Name': p['name'],
+                       'Admission': p['admission_time'],
+                       'Consult': p['consult_time'],
+                       'Treatment': p['treatment_time'],
+                       'Discharge': p['discharge_time']} for p in patients]
             pd.DataFrame(sheet1).to_excel(writer, sheet_name='Timeline', index=False)
-            sheet2 = [{'Patient Name':p['name'],'LOS (days)':p['los_days'],'Admit→Consult':p['admission_to_consult_hrs'],
-                       'Admit→Treat':p['admission_to_treatment_hrs'],'Treat→Discharge':p['treatment_to_discharge_hrs'],
-                       'Deceased':p['deceased']} for p in patients]
+            sheet2 = [{'Patient Name': p['name'],
+                       'LOS (days)': p['los_days'],
+                       'Admit→Consult': p['admission_to_consult_hrs'],
+                       'Admit→Treat': p['admission_to_treatment_hrs'],
+                       'Treat→Discharge': p['treatment_to_discharge_hrs'],
+                       'Deceased': p['deceased']} for p in patients]
             pd.DataFrame(sheet2).to_excel(writer, sheet_name='Metrics', index=False)
         output.seek(0)
-        return send_file(output, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                         as_attachment=True, download_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        return send_file(output,
+                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                         as_attachment=True,
+                         download_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -413,7 +456,8 @@ def export_csv():
         output.write("\nPatient Name,LOS (days),Admit→Consult,Admit→Treat,Treat→Discharge,Deceased\n")
         for p in patients:
             output.write(f'"{p["name"]}",{p["los_days"]},{p["admission_to_consult_hrs"]},{p["admission_to_treatment_hrs"]},{p["treatment_to_discharge_hrs"]},{p["deceased"]}\n')
-        return Response(output.getvalue(), mimetype='text/csv',
+        return Response(output.getvalue(),
+                        mimetype='text/csv',
                         headers={'Content-Disposition': f'attachment; filename=report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -426,7 +470,10 @@ def export_html():
         patients = data.get('patients', [])
         if not patients:
             return jsonify({'error': 'No patients'}), 400
-        rows = ''.join(f'<tr><td>{p["name"]}</td><td>{p["admission_time"]}</td><td>{p["consult_time"]}</td><td>{p["treatment_time"]}</td><td>{p["discharge_time"]}</td></tr>' for p in patients)
+        rows = ''.join(f'<tr><td>{escape(p["name"])}</td><td>{escape(p["admission_time"])}</td>'
+                       f'<td>{escape(p["consult_time"])}</td><td>{escape(p["treatment_time"])}</td>'
+                       f'<td>{escape(p["discharge_time"])}</td></tr>'
+                       for p in patients)
         html = f"<html><body><h1>Patient Report</h1><table border='1'><tr><th>Name</th><th>Admission</th><th>Consult</th><th>Treatment</th><th>Discharge</th></tr>{rows}</table></body></html>"
         return jsonify({'success': True, 'report_html': html})
     except Exception as e:
@@ -434,9 +481,9 @@ def export_html():
 
 if __name__ == "__main__":
     print("="*60)
-    print("🏥 FHIR Patient Report System (Enhanced)")
+    print("🏥 FHIR Patient Report System (Enhanced Security)")
     print(f"Data source: {DATA_SOURCE}")
     print(f"Total patients: {len(ALL_PATIENTS)}")
     print("Server: http://localhost:5000")
     print("="*60)
-    app.run(debug= True, port=5000)
+    app.run(debug=True, port=5000)
